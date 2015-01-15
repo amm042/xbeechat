@@ -71,9 +71,9 @@ class XbeeChat(threading.Thread):
         self.start()
 
     """
-    The callback function which analysis incoming packet and dispaly the result
+    The callback function which analysis incoming packet and display the result
     """
-    def on_packet(self, pkt)
+    def on_packet(self, pkt):
         tx_status_codes = {'\x00': 'Success', '\x01': 'No ACK', '\x02': 'CCA fail', '\x03': 'Purged'}
 
         if pkt and 'id' in pkt and pkt['id'] == 'tx_status':
