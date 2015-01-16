@@ -66,7 +66,7 @@ class XbeeChat(threading.Thread):
         self.callback = callback
         self.cmd_queue = Queue.Queue()
 
-        self.ser = serial.Serial(self.port, 9600, rtscts = True)
+        self.ser = serial.Serial(self.port, 115200, rtscts = True)
         self.xbee = XBee(self.ser, callback = self.on_packet)
         self.start()
 
