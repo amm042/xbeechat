@@ -36,7 +36,7 @@ import serial
 import time
 
 logging.basicConfig(level=logging.INFO)
-bauds = [9600, 115200, 57600, 1200, 2400, 4800, 19200, 38400]
+bauds = [9600,38400, 115200, 57600, 1200, 2400, 4800, 19200 ]
 def get_devs(prefix=['ttyUSB', 'ttyACM'], root='/dev'):
     devs = []
     for pr in prefix:
@@ -68,7 +68,7 @@ def try_configure(dev, baud = 9600):
     
     if rsp == "OK":
         # entered command mode. setup now
-        for cmd in ['ATBD7\r',  #set baud to 115200
+        for cmd in ['ATBD5\r',  #set baud to 38400
                     'ATAP2\r',  # api mode with escapted chars
                     'ATMM2\r',  # mac mode 2 (802.15.4) w/ acks
                     'ATWR\r',   # write

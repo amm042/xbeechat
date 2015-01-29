@@ -47,28 +47,65 @@ class TxStatus:
 #       logging.getLogger(__name__).info("Queue delay was: {}".format((self.times['dequeue']-
         return self.status
 
+def hexdump(x):
+    if x:
+        return " ".join(["{:02x}".format(ord(i)) for i in x])
+    else:
+        return "None"
 """
 XbeeChat class is an asynchronous queueing system that can handle packet transmission
 between Xbee radios. The strcture of packets is based on XBee API mode frame and the
 transmission function is based on python-xbee library(https://code.google.com/p/python-xbee/)
 """
 class XbeeChat(threading.Thread):
-    def __init__(self, port, address, callback = None):
+    def __init__(self, port, panid, address, channel = 15, callback = None):
         super(XbeeChat, self).__init__()
         self.setDaemon(True)
         self.port = port
         self.name = "Xbee Chat Worker Thread on port {}".format(self.port)
         self.log = logging.getLogger("xbee[{}]".format(self.port))
         self.address = address
+        self.panid = panid
+        if channel < 11 or channel > 26:
+            raise Exception("Invalid channel, must be 11-26 (XBee), other are not supported.")
+        self.channel = channel
 
+        self.seqno = 1
         self.inflight = {}
 
         self.callback = callback
         self.cmd_queue = Queue.Queue()
 
-        self.ser = serial.Serial(self.port, 115200, rtscts = True)
-        self.xbee = XBee(self.ser, callback = self.on_packet)
+        self.startedEvt = threading.Event()
+
+        self.ser = serial.Serial(self.port, 38400, rtscts = True)
+        self.ser.flushInput()
+        self.ser.flushOutput()
+        self.xbee = XBee(self.ser, callback = self.on_packet, escaped = True)
         self.start()
+        if not self.startedEvt.wait(5):
+            raise Exception("XBee send thread failed to start") 
+        
+        try:
+            self.configure([('AP', struct.pack(">H", 2)),
+                    ('MM', "\x02"),
+                    ('MY', struct.pack(">H", self.address)),
+                    ("CH", struct.pack(">B", self.channel)),
+                    ("ID", struct.pack(">H", self.panid)),
+                    ("D7", "\x01"),
+                    ("D6", "\x01"),
+                    ("IU", "\x00"),
+                    ("P0", "\x01"),
+                    ("P1", "\x00"),
+                    ("RN", "\x01"), # random delay slot backoff in CSMA-CA
+                    ("AI", None)
+                    ])       
+        except Exception as x:
+            # if we fail at this point, we have to shutdown, then raise the exception
+            self.log.info("shutting down")
+            self.xbee.halt()
+            self.ser.close()
+            raise x
 
     """
     The callback function which analysis incoming packet and display the result
@@ -76,22 +113,47 @@ class XbeeChat(threading.Thread):
     def on_packet(self, pkt):
         tx_status_codes = {'\x00': 'Success', '\x01': 'No ACK', '\x02': 'CCA fail', '\x03': 'Purged'}
 
-        if pkt and 'id' in pkt and pkt['id'] == 'tx_status':
+        if 'frame_id' in pkt:    
             frame_id = struct.unpack("B", pkt['frame_id'])[0]
-            self.log.debug("TX status: frame_id: {}, status: {}".format(frame_id,
+        else:
+            frame_id = None
+            
+        if pkt and 'id' in pkt and pkt['id'] == 'at_response':
+            status = struct.unpack("B", pkt['status'])[0]
+                        
+            if status > 0:
+                log = self.log.warn
+            else:
+                log = self.log.debug
+                    
+            if 'parameter' not in pkt:
+                pkt['parameter'] = None
+        
+            log("AT response, frame_id: {}, command: {}, parameter: {}, status: {}".format(
+                                                                                         hexdump(pkt['frame_id']),
+                                                                                         pkt['command'],
+                                                                                         hexdump(pkt['parameter']), 
+                                                                                         status))                    
+            if frame_id not in self.inflight:
+                self.log.warn("No matching command packet to this frame_id!")
+                
+        elif pkt and 'id' in pkt and pkt['id'] == 'tx_status':
+
+            self.log.info("TX status: frame_id: {}, status: {}".format(frame_id,
                                                                        tx_status_codes[pkt['status']]))
 
-            if frame_id in self.inflight:
-                self.inflight[frame_id].status = struct.unpack("B", pkt['status'])[0]
-                self.inflight[frame_id].evt.set()
+            if frame_id not in self.inflight:
+                self.log.warn("No matching TX packet to this frame_id!")
 
         elif pkt and 'id' in pkt and pkt['id'] == 'rx':
             self.log.debug("RX: src: {}, rssi: -{} dbm, data: {}".format(struct.unpack(">H", pkt['source_addr'])[0],
                                                                    struct.unpack("B", pkt['rssi'])[0],
-                                                                   " ".join(["{:02x}".format(ord(i)) for i in pkt['rf_data']])
-                                                                   ))
+                                                                   hexdump(pkt['rf_data'])))
         else:
             self.log.info("RX: {}".format(pkt))
+        if frame_id and frame_id in self.inflight:
+            self.inflight[frame_id].status = struct.unpack("B", pkt['status'])[0]
+            self.inflight[frame_id].evt.set()
 
         if self.callback:
             self.callback(self, pkt)
@@ -107,38 +169,63 @@ class XbeeChat(threading.Thread):
                             {'data': payload,
                              'dest': dest},
                             evt))
-        self.log.info("packet of len: {} queued".format(len(payload)))
+        self.log.debug("packet of len: {} queued".format(len(payload)))
         return evt
+    def sendAT(self, command, parameter = None):
+        evt = TxStatus()
+        if parameter:
+            assert len(parameter) <= 100, "Max parameter length is 100 bytes"
+        self.cmd_queue.put(("at",
+                                {'command': command,
+                                 'parameter': parameter},
+                                evt))
+        if parameter:
+            self.log.debug("at command of len: {} queued".format(len(parameter)))
+        else:
+            self.log.debug("at command queued")
+        return evt
+    def configure(self, commands):        
+        for c in commands:            
+            e = self.sendAT(*c)
+            e.wait(2)
+            if e.status == None or e.status > 0:
+                raise Exception("XBee config failed (status={}).".format(e.status)) 
     """
     Configure the Xbee and then keep deqeueing stored packets and then send by calling send
     function in python-xbee
     """
     def run(self):
 
-        self.xbee.send("at", frame_id= 'x', command="VR")
-        self.xbee.send("at", frame_id= 'y', command="HV")
+        self.startedEvt.set()
 
 
-        self.xbee.send("at", frame_id= 'z', command="AP", parameter=struct.pack(">H", 1))
-        self.xbee.send("at", frame_id ='a', command="MM", parameter="\x02")
-        self.xbee.send("at", frame_id= 'z', command="MY", parameter=struct.pack(">H", self.address))
-        self.xbee.send("at", frame_id= 'z', command="MY")
-
-        time.sleep(1)
-
-        i = 1
         while True:
 
             cmd, params, evt = self.cmd_queue.get()
 
-            if cmd == "tx":
-                self.log.info("TX: frame_id: {}, dest_addr: {}, data: {}".format(i,
+            if cmd == 'at':
+                self.log.info("AT command: frame_id: {:02x}, command: {}, params: {}".format(self.seqno,                                                                                            
+                                                                                            params['command'],
+                                                                                            hexdump(params['parameter'])))
+                self.inflight[self.seqno & 0xff] = evt
+                if 'parameter' in params and params['parameter']:
+                    self.xbee.send("at",
+                                   frame_id = struct.pack("B", self.seqno & 0xff),
+                                   command = params['command'],
+                                   parameter = params['parameter']
+                                   )
+                else:
+                    self.xbee.send("at",
+                                   frame_id = struct.pack("B", self.seqno & 0xff),
+                                   command = params['command'])
+            elif cmd == "tx":
+                self.log.info("TX: frame_id: {:02x}, dest_addr: {}, data: {}".format(self.seqno,
                                                                                  params['dest'],
                                                                                  params['data']))
-                self.inflight[i & 0xff] = evt
+                self.inflight[self.seqno & 0xff] = evt
 
                 self.xbee.send("tx",
-                               frame_id = struct.pack("B", i & 0xff),
+                               frame_id = struct.pack("B", self.seqno & 0xff),
                                dest_addr = struct.pack(">H", params['dest']),
                                data = params['data'])
             elif cmd == "quit":
@@ -147,12 +234,12 @@ class XbeeChat(threading.Thread):
                 self.ser.close()
                 break
             else:
-                self.log.error("Invalid command recieved: {}".format(cmd))
+                self.log.error("Invalid command received: {}".format(cmd))
 
-            i = i + 1
+            self.seqno += 1
             # don't send frame id = 0 becuase no tx status is sent back.
-            if i & 0xff == 0:
-                i = 1
+            if self.seqno & 0xff == 0:
+                self.seqno = 1
 
     def close(self):
         self.cmd_queue.put( ('quit', None, None))
