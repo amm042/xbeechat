@@ -54,7 +54,7 @@ def send_command(device, atcmd = "AT", timeout = 1):
     return rslt
 def try_configure(dev, baud = 9600):
     # default xbee settings are 9600 baud, 8, n, 1
-    s = serial.Serial(dev, baud, timeout=1)
+    s = serial.Serial(dev, baud, timeout=1, rtscts = False, xonxoff = True)
     
     logging.info("Trying {} at {} baud".format(dev, baud))
     
@@ -68,7 +68,9 @@ def try_configure(dev, baud = 9600):
     
     if rsp == "OK":
         # entered command mode. setup now
-        for cmd in ['ATBD5\r',  #set baud to 38400
+        for cmd in ['ATRE\n', # set to factory defaults
+                    'ATWR\r',   # write
+                    'ATBD5\r',  #set baud to 38400
                     'ATAP2\r',  # api mode with escapted chars
                     'ATMM2\r',  # mac mode 2 (802.15.4) w/ acks
                     'ATWR\r',   # write
@@ -78,14 +80,15 @@ def try_configure(dev, baud = 9600):
     else:
         return False
     
-for dev in get_devs():
-    logging.info("Found USB device at {}".format(dev))
+def main():
+    for dev in get_devs():
+        logging.info("Found USB device at {}".format(dev))
+    
+        for b in bauds:
+            if try_configure(dev, baud = b):
+                logging.info("Success")
+                break
 
-    for b in bauds:
-        if try_configure(dev, baud = b):
-            logging.info("Success")
-            break
 
-
-#if __name__ == "__main__":
-    #init()
+if __name__ == "__main__":
+    main()

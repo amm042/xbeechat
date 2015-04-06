@@ -87,22 +87,28 @@ class XbeeChat(threading.Thread):
             raise Exception("XBee send thread failed to start") 
         
         try:
-            self.configure([('AP', struct.pack(">H", 2)),
-                    ('MM', "\x02"),
+            self.configure([('AP', struct.pack(">H", 2)),  # API enabled with escaped chars = 2
+                    ('MM', "\x02"),  # 802.15.4 with ACKS = 2
                     ('MY', struct.pack(">H", self.address)),
                     ("CH", struct.pack(">B", self.channel)),
                     ("ID", struct.pack(">H", self.panid)),
-                    ("D7", "\x01"),
-                    ("D6", "\x01"),
-                    ("IU", "\x00"),
-                    ("P0", "\x01"),
-                    ("P1", "\x00"),
-                    ("RN", "\x01"), # random delay slot backoff in CSMA-CA
-                    ("AI", None)
+                    ("D7", "\x01"),  # CTS flow control = 1
+                    ("D6", "\x01"),  # RTS flow control = 1
+                    ("D5", "\x00"),  # DIO disabled = 0
+                    ("D4", "\x00"),  # DIO disabled = 0
+                    ("D3", "\x00"),  # DIO disabled = 0
+                    ("D2", "\x00"),  # DIO disabled = 0
+                    ("D1", "\x00"),  # DIO disabled = 0
+                    ("D0", "\x00"),  # DIO disabled = 0
+                    ("IU", "\x00"),  # I/O output disabled = 0
+                    ("P0", "\x01"),  # PWM0 output RSSI = 1
+                    ("P1", "\x00"),  # PWM1 output disabled = 0
+                    ("RN", "\x01"),  # larger random delay slot backoff in CSMA-CA
+                    ("AI", None)     # read association indication
                     ])       
         except Exception as x:
             # if we fail at this point, we have to shutdown, then raise the exception
-            self.log.info("shutting down")
+            self.log.info("shutting down, init failed with: {}".format(x))
             self.xbee.halt()
             self.ser.close()
             raise x
@@ -184,12 +190,19 @@ class XbeeChat(threading.Thread):
         else:
             self.log.debug("at command queued")
         return evt
-    def configure(self, commands):        
-        for c in commands:            
-            e = self.sendAT(*c)
-            e.wait(2)
+    def configure(self, commands):    
+                    
+        for c in commands:
+            
+            for t in range(4):
+                e = self.sendAT(*c)
+                e.wait(2)
+                if e.status:                    
+                    break
+            
             if e.status == None or e.status > 0:
-                raise Exception("XBee config failed (status={}).".format(e.status)) 
+                raise Exception("XBee config failed (status={}).".format(e.status))                
+                 
     """
     Configure the Xbee and then keep deqeueing stored packets and then send by calling send
     function in python-xbee
